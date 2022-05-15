@@ -11,7 +11,7 @@ pub enum EscrowInstruction {
 
 impl EscrowInstruction {
     pub fn unpack(input: &[u8]) -> Result<Self, ProgramError> {
-        let (tag, rest) = input.split_first().ok_or(InvalidInstruction);
+        let (tag, rest) = input.split_first().ok_or(InvalidInstruction)?;
         Ok(match tag {
             0 => Self::InitEscrow {
                 amount: Self::unpack_amount(rest)?,
