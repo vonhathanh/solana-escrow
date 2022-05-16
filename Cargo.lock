@@ -6,6 +6,7 @@ version = 3
 name = "Solana-escrowd"
 version = "0.1.0"
 dependencies = [
+ "arrayref",
  "solana-program",
  "spl-token",
  "thiserror",
