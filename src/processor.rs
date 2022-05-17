@@ -6,9 +6,10 @@ use solana_program::{
     pubkey::Pubkey,
     program_pack::{Pack, IsInitialized},
     sysvar::{rent::Rent, Sysvar},
+    program::invoke
 };
 
-use crate::{instruction::EscrowInstruction, error::EscrowError};
+use crate::{instruction::EscrowInstruction, error::EscrowError, state::Escrow};
 
 pub struct Processor;
 impl Processor {
@@ -19,6 +20,10 @@ impl Processor {
             EscrowInstruction::InitEscrow { amount } => {
                 msg!("Instruction: InitEscrow");
                 Self::process_init_escrow(accounts, amount, program_id)
+            },
+            EscrowInstruction::Exchange { amount } => {
+                msg!("Instruction: Exchange");
+                Self::process_exchange(accounts, amount, program_id)
             }
         }
     }
@@ -54,6 +59,101 @@ impl Processor {
             return Err(ProgramError::AccountAlreadyInitialized);
         }
 
+        escrow_info.is_initialized = true;
+        escrow_info.initializer_pubkey = *initializer.key;
+        escrow_info.temp_token_account_pubkey = *temp_token_account.key;
+        escrow_info.initializer_token_to_receive_account_pubkey = *token_to_receive_account.key;
+        escrow_info.expected_amount = amount;
+
+        Escrow::pack(escrow_info, &mut escrow_account.try_borrow_mut_data()?)?;
+        let (pda, _bump_seed) = Pubkey::find_program_address(&[b"escrow"], program_id);
+
+        let token_program = next_account_info(account_info_iter)?;
+        let owner_change_ix = spl_token::instruction::set_authority(
+            token_program.key,
+            temp_token_account.key,
+            Some(&pda),
+            spl_token::instruction::AuthorityType::AccountOwner,
+            initializer.key,
+            &[&initializer.key],
+        )?;
+
+        msg!("Calling the token program to transfer token account ownership...");
+        invoke(
+            &owner_change_ix,
+            &[
+                temp_token_account.clone(),
+                initializer.clone(),
+                token_program.clone(),
+            ],
+        )?;
+
+        Ok(())
+    }
+    // inside: impl Processor {}
+    fn process_exchange(
+        accounts: &[AccountInfo],
+        amount_expected_by_taker: u64,
+        program_id: &Pubkey,
+    ) -> ProgramResult {
+        let account_info_iter = &mut accounts.iter();
+        let taker = next_account_info(account_info_iter)?;
+
+        if !taker.is_signer {
+            return Err(ProgramError::MissingRequiredSignature);
+        }
+
+        let takers_sending_token_account = next_account_info(account_info_iter)?;
+
+        let takers_token_to_receive_account = next_account_info(account_info_iter)?;
+
+        let pdas_temp_token_account = next_account_info(account_info_iter)?;
+        let pdas_temp_token_account_info =
+            TokenAccount::unpack(&pdas_temp_token_account.try_borrow_data()?)?;
+        let (pda, bump_seed) = Pubkey::find_program_address(&[b"escrow"], program_id);
+
+        if amount_expected_by_taker != pdas_temp_token_account_info.amount {
+            return Err(EscrowError::ExpectedAmountMismatch.into());
+        }
+
+        let initializers_main_account = next_account_info(account_info_iter)?;
+        let initializers_token_to_receive_account = next_account_info(account_info_iter)?;
+        let escrow_account = next_account_info(account_info_iter)?;
+
+        let escrow_info = Escrow::unpack(&escrow_account.try_borrow_data()?)?;
+
+        if escrow_info.temp_token_account_pubkey != *pdas_temp_token_account.key {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        if escrow_info.initializer_pubkey != *initializers_main_account.key {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        if escrow_info.initializer_token_to_receive_account_pubkey != *initializers_token_to_receive_account.key {
+            return Err(ProgramError::InvalidAccountData);
+        }
+
+        let token_program = next_account_info(account_info_iter)?;
+
+        let transfer_to_initializer_ix = spl_token::instruction::transfer(
+            token_program.key,
+            takers_sending_token_account.key,
+            initializers_token_to_receive_account.key,
+            taker.key,
+            &[&taker.key],
+            escrow_info.expected_amount,
+        )?;
+        msg!("Calling the token program to transfer tokens to the escrow's initializer...");
+        invoke(
+            &transfer_to_initializer_ix,
+            &[
+                takers_sending_token_account.clone(),
+                initializers_token_to_receive_account.clone(),
+                taker.clone(),
+                token_program.clone(),
+            ],
+        )?;
         Ok(())
     }
 }
